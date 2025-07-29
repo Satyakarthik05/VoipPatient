@@ -1,57 +1,58 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Button, FlatList, StyleSheet, Alert, Modal } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { API_URL } from '../services/service';
+import { WS_URL } from '../services/service';
 
 interface Props {
   route: {
     params: {
       username: string;
-      role: 'PATIENT';
+      role: 'DOCTOR' | 'PATIENT';
       id: number;
-      medicalHistory?: string;
     };
   };
 }
 
-const PatientHomeScreen: React.FC<Props> = ({ route }) => {
-  const { id, medicalHistory } = route.params;
-  const [doctors, setDoctors] = useState<any[]>([]);
+const HomeScreen: React.FC<Props> = ({ route }) => {
+  const { role, id, username } = route.params;
+  const [users, setUsers] = useState<any[]>([]);
   const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
   const [callerName, setCallerName] = useState<string>('');
   const navigation = useNavigation<any>();
   const wsRef = useRef<WebSocket | null>(null);
 
-  const fetchDoctors = async () => {
+  const fetchUsers = async () => {
+    const oppositeRole = role === 'DOCTOR' ? 'PATIENT' : 'DOCTOR';
     try {
       const res = await fetch(
-        `http://192.168.29.219:8080/api/users/role-view?role=DOCTOR`
+        `${API_URL}/api/users/role-view?role=${oppositeRole}` 
       );
       const data = await res.json();
-      setDoctors(data);
+      setUsers(data);
     } catch (error) {
-      Alert.alert('Error', 'Failed to fetch doctors');
+      Alert.alert('Error', 'Failed to fetch users');
     }
   };
 
-  const handleCall = async (doctorId: number, doctorName: string) => {
+  const handleCall = async (receiverId: number, receiverName: string) => {
     try {
-      await fetch(`http://192.168.29.219:8080/api/calls/start`, {
+      await fetch(`${API_URL}/api/calls/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           callerId: id, 
-          receiverId: doctorId,
-          callerName: route.params.username,
-          callerRole: 'PATIENT'
+          receiverId,
+          callerName: username 
         }),
       });
 
       navigation.navigate('VideoCallScreen', {
         currentUserId: id.toString(),
-        otherUserId: doctorId.toString(),
+        otherUserId: receiverId.toString(),
         isCaller: true,
-        otherUserName: doctorName,
-        userRole: 'PATIENT'
+        otherUserName: receiverName,
+        callerRole: role
       });
     } catch (error) {
       Alert.alert('Error', 'Could not initiate call');
@@ -66,33 +67,32 @@ const PatientHomeScreen: React.FC<Props> = ({ route }) => {
       otherUserId: incomingCallFrom,
       isCaller: false,
       otherUserName: callerName,
-      userRole: 'PATIENT'
+      callerRole: 'DOCTOR' // Only doctors can receive calls in this flow
     });
 
-    setIncomingCallFrom(null);
+    setIncomingCallFrom(null); 
   };
 
   const rejectCall = () => {
     wsRef.current?.send(JSON.stringify({
       type: 'call_rejected',
       from: id.toString(),
-      to: incomingCallFrom,
-      role: 'PATIENT'
+      to: incomingCallFrom
     }));
     setIncomingCallFrom(null);
   };
 
   useEffect(() => {
-    fetchDoctors();
+    fetchUsers();
 
-    const wsUrl = 'ws://192.168.29.219:8080/signal';
+    const wsUrl = `${WS_URL}/signal`;
     wsRef.current = new WebSocket(wsUrl);
 
     wsRef.current.onopen = () => {
       const joinMessage = JSON.stringify({ 
         type: 'join', 
         userId: id.toString(),
-        role: 'PATIENT'
+        role: role
       });
       wsRef.current?.send(joinMessage);
     };
@@ -100,9 +100,12 @@ const PatientHomeScreen: React.FC<Props> = ({ route }) => {
     wsRef.current.onmessage = (msg) => {
       try {
         const data = JSON.parse(msg.data);
-        if (data.type === 'incoming_call' && data.callerRole === 'DOCTOR') {
-          setCallerName(data.callerName || 'Doctor');
+        if (data.type === 'incoming_call') {
+          setCallerName(data.callerName || 'Unknown');
           setIncomingCallFrom(data.from);
+        } else if (data.type === 'call_rejected') {
+          Alert.alert('Call Rejected', 'The doctor rejected your call');
+          setIncomingCallFrom(null);
         }
       } catch (e) {
         console.error('Message parse error:', e);
@@ -116,22 +119,23 @@ const PatientHomeScreen: React.FC<Props> = ({ route }) => {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>Available Doctors</Text>
-      {medicalHistory && (
-        <Text style={styles.medicalHistory}>My Medical History: {medicalHistory}</Text>
-      )}
+      <Text style={styles.heading}>
+        {role === 'DOCTOR' ? 'Patients' : 'Doctors'} List
+      </Text>
 
       <FlatList
-        data={doctors}
+        data={users}
         keyExtractor={(item) => item.id?.toString() || Math.random().toString()}
         renderItem={({ item }) => (
           <View style={styles.card}>
-            <Text style={styles.cardText}>Dr. {item.fullName}</Text>
-            <Text style={styles.cardText}>Specialization: {item.specialization}</Text>
-            <Button 
-              title="Request Consultation" 
-              onPress={() => handleCall(item.id, item.fullName)} 
-            />
+            <Text style={styles.cardText}>{item.fullName}</Text>
+            <Text style={styles.cardText}>{item.username}</Text>
+            {role === 'PATIENT' && (
+              <Button 
+                title="Call Now" 
+                onPress={() => handleCall(item.id, item.fullName || item.username)} 
+              />
+            )}
           </View>
         )}
       />
@@ -140,7 +144,7 @@ const PatientHomeScreen: React.FC<Props> = ({ route }) => {
         <View style={styles.modalContainer}>
           <View style={styles.modal}>
             <Text style={styles.modalText}>
-              Dr. {callerName} is calling...
+              Incoming Call from {callerName}
             </Text>
             <View style={styles.modalButtons}>
               <Button title="Accept" onPress={acceptCall} />
@@ -155,9 +159,15 @@ const PatientHomeScreen: React.FC<Props> = ({ route }) => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5' },
-  heading: { fontSize: 22, marginBottom: 10, fontWeight: 'bold', textAlign: 'center' },
-  medicalHistory: { fontSize: 14, marginBottom: 20, fontStyle: 'italic', color: '#555' },
-  card: { padding: 15, backgroundColor: '#4caf50', marginBottom: 10, borderRadius: 8 },
+  heading: { fontSize: 22, marginBottom: 20, fontWeight: 'bold', textAlign: 'center' },
+  card: { 
+    padding: 15, 
+    backgroundColor: '#6200ee', 
+    marginBottom: 10, 
+    borderRadius: 8,
+    flexDirection: 'column',
+    gap: 10
+  },
   cardText: { color: 'white', marginBottom: 5 },
   modalContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   modal: { width: '80%', backgroundColor: 'white', borderRadius: 10, padding: 20, alignItems: 'center' },
@@ -165,4 +175,4 @@ const styles = StyleSheet.create({
   modalButtons: { flexDirection: 'row', justifyContent: 'space-around', width: '100%' },
 });
 
-export default PatientHomeScreen;
+export default HomeScreen;

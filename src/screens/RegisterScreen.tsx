@@ -3,6 +3,7 @@ import { View, TextInput, Button, Alert, StyleSheet } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { User } from '../types/User';
 import { Picker } from '@react-native-picker/picker';
+import { API_URL } from '../services/service';
 
 type Props = NativeStackScreenProps<any, 'Register'>;
 
@@ -16,7 +17,7 @@ const RegisterScreen: React.FC<Props> = ({ navigation }) => {
 
   const handleRegister = async () => {
     try {
-      const res = await fetch('http://192.168.0.103:8080/api/auth/register', {
+      const res = await fetch(`${API_URL}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(user),

@@ -17,9 +17,16 @@ import {
   RTCSessionDescription,
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
-import RecordScreen, { RecordingResult } from 'react-native-record-screen';
+import AudioRecorderPlayer, {
+  AudioEncoderAndroidType,
+  AudioSourceAndroidType,
+  OutputFormatAndroidType,
+} from 'react-native-audio-recorder-player';
+
 import RNFS from 'react-native-fs';
 import moment from 'moment';
+import { API_URL } from '../services/service';
+import { WS_URL } from '../services/service';
 
 interface VideoCallScreenProps {
   route: {
@@ -28,6 +35,7 @@ interface VideoCallScreenProps {
       otherUserId: string;
       isCaller: boolean;
       otherUserName?: string;
+      callerRole: 'DOCTOR' | 'PATIENT';
     };
   };
   navigation: any;
@@ -37,16 +45,20 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   route,
   navigation,
 }) => {
-  const { currentUserId, otherUserId, isCaller, otherUserName } = route.params;
+  const { currentUserId, otherUserId, isCaller, otherUserName, callerRole } =
+    route.params;
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [status, setStatus] = useState(isCaller ? 'Calling...' : 'Connecting...');
+  const [status, setStatus] = useState(
+    isCaller ? 'Calling...' : 'Connecting...',
+  );
   const [callConnected, setCallConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
-  const [recordingPath, setRecordingPath] = useState<string | null>(null);
+  const [isVideoOn, setIsVideoOn] = useState(true);
+  const [audioPath, setAudioPath] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [callStartTime, setCallStartTime] = useState<Date | null>(null);
   const [callDuration, setCallDuration] = useState('00:00:00');
@@ -56,110 +68,55 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const hasEndedCall = useRef(false);
   const durationInterval = useRef<NodeJS.Timeout | null>(null);
   const callStartRef = useRef<Date | null>(null);
+const audioRecorderPlayer = useRef(AudioRecorderPlayer);
+
 
   const configuration = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   };
 
-  const requestAudioPermission = async () => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-          {
-            title: 'Microphone Permission',
-            message: 'App needs microphone access to record calls',
-            buttonPositive: 'OK',
-          }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) {
-        console.warn('Permission error:', err);
-        return false;
-      }
-    }
-    return true;
+  const prepareAudioPath = () => {
+    const path = `${RNFS.DocumentDirectoryPath}/call_${currentUserId}_${Date.now()}.mp3`;
+    setAudioPath(path);
+    return path;
   };
 
-  const startRecording = async () => {
-    if (isRecording || !callStartRef.current) return;
-    
-    const hasMicPermission = await requestAudioPermission();
-    if (!hasMicPermission) {
-      Alert.alert('Permission Denied', 'Microphone access is required for recording.');
-      return;
-    }
-
+  const startAudioRecording = async () => {
     try {
-      const res = await RecordScreen.startRecording({
-        mic: true,
-        bitrate: 1024000,
-        fps: 24,
+      const path = prepareAudioPath();
+      
+      await audioRecorderPlayer.current.startRecorder(path, {
+        AudioEncoderAndroid: AudioEncoderAndroidType.AAC,
+        AudioSourceAndroid: AudioSourceAndroidType.MIC,
+        OutputFormatAndroid: OutputFormatAndroidType.MPEG_4,
       });
-
-      if (res === RecordingResult.PermissionError) {
-        Alert.alert('Permission Error', 'User denied recording permission.');
-        return;
-      }
-
+      
       setIsRecording(true);
-      console.log('Recording started');
     } catch (error) {
-      console.error('Start Recording Error:', error);
-      Alert.alert('Error', 'Failed to start recording.');
+      console.error('Failed to start audio recording:', error);
     }
   };
 
-  const stopRecording = async () => {
+  const stopAudioRecording = async () => {
     if (!isRecording) return null;
 
     try {
-      const res = await RecordScreen.stopRecording() as {
-        result?: {
-          outputURL?: string;
-        };
-      };
-
-      if (res?.result?.outputURL) {
-        const originalPath = res.result.outputURL;
-        const internalFolder = `${RNFS.DocumentDirectoryPath}/call_recordings`;
-
-        const exists = await RNFS.exists(internalFolder);
-        if (!exists) {
-          await RNFS.mkdir(internalFolder);
-        }
-
-        const fileName = `call_${currentUserId}_${otherUserId}_${Date.now()}.mp4`;
-        const newPath = `${internalFolder}/${fileName}`;
-        await RNFS.copyFile(originalPath, newPath);
-
-        setRecordingPath(newPath);
-        setIsRecording(false);
-        return newPath;
-      }
-      
+      const result = await audioRecorderPlayer.current.stopRecorder();
       setIsRecording(false);
-      console.warn('Recording failed - no output file');
-      return null;
+      return result;
     } catch (error) {
-      console.error('Failed to stop recording:', error);
+      console.error('Failed to stop audio recording:', error);
       setIsRecording(false);
       return null;
     }
   };
 
-  const uploadRecording = async (filePath: string) => {
+  const uploadAudioRecording = async (filePath: string) => {
     try {
       const fileData = await RNFS.readFile(filePath, 'base64');
       const duration = calculateDuration();
 
-      const startTimeISO = callStartTime
-        ? new Date(callStartTime).toISOString()
-        : new Date().toISOString();
-
-      const endTimeISO = new Date().toISOString();
-
-      const response = await fetch('http://192.168.29.219:8080/api/calls/save', {
+      const response = await fetch(`${API_URL}/api/calls/save`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -167,11 +124,12 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         body: JSON.stringify({
           callerId: isCaller ? currentUserId : otherUserId,
           receiverId: isCaller ? otherUserId : currentUserId,
-          startTime: startTimeISO,
-          endTime: endTimeISO,
+          startTime: callStartTime?.toISOString() || new Date().toISOString(),
+          endTime: new Date().toISOString(),
           duration,
           recording: fileData,
           fileName: filePath.split('/').pop(),
+          endedBy: callerRole,
         }),
       });
 
@@ -179,7 +137,6 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         throw new Error('Failed to upload recording');
       }
 
-      console.log('Recording uploaded successfully');
       return true;
     } catch (error) {
       console.error('Upload error:', error);
@@ -187,16 +144,21 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     }
   };
 
+  const calculateDuration = () => {
+    if (!callStartRef.current) return '00:00:00';
+    const endTime = new Date();
+    const duration = moment.duration(
+      moment(endTime).diff(moment(callStartRef.current)),
+    );
+    return moment.utc(duration.asMilliseconds()).format('HH:mm:ss');
+  };
+
   const startDurationTimer = () => {
     stopDurationTimer();
+    callStartRef.current = new Date();
+    setCallStartTime(new Date());
     durationInterval.current = setInterval(() => {
-      if (callStartRef.current) {
-        const now = new Date();
-        const durationMs = now.getTime() - callStartRef.current.getTime();
-        const duration = new Date(durationMs);
-        const formattedDuration = duration.toISOString().substr(11, 8);
-        setCallDuration(formattedDuration);
-      }
+      setCallDuration(calculateDuration());
     }, 1000);
   };
 
@@ -207,70 +169,63 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     }
   };
 
-  const calculateDuration = () => {
-    if (!callStartRef.current) return '00:00:00';
-    const endTime = new Date();
-    const duration = moment.duration(moment(endTime).diff(moment(callStartRef.current)));
-    return moment.utc(duration.asMilliseconds()).format('HH:mm:ss');
+  const cleanupResources = async () => {
+    try {
+      // Stop audio recording if active
+      if (isRecording) {
+        const savedPath = await stopAudioRecording();
+        if (savedPath) {
+          await uploadAudioRecording(savedPath);
+        }
+      }
+
+      // Close peer connection
+      if (pc.current) {
+        pc.current.close();
+        pc.current = null;
+      }
+
+      // Stop local media
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        setLocalStream(null);
+      }
+
+      // Stop remote media
+      if (remoteStream) {
+        remoteStream.getTracks().forEach(track => track.stop());
+        setRemoteStream(null);
+      }
+
+      // Stop audio management
+      InCallManager.stop();
+      InCallManager.setSpeakerphoneOn(false);
+      stopDurationTimer();
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
   };
 
+  const endCall = async (remoteEnded: boolean = false) => {
+    if (hasEndedCall.current) return;
+    hasEndedCall.current = true;
 
-  
-
- const cleanupResources = async () => {
-  try {
-    // Stop recording first if active
-    if (isRecording) {
-      const savedPath = await stopRecording();
-      if (savedPath) {
-        await uploadRecording(savedPath);
-      }
-    }
-
-    // Close peer connection
-    if (pc.current) {
-      pc.current.close();
-      pc.current = null;
-    }
-
-    // Stop local media
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-      setLocalStream(null);
-    }
-
-    // Stop audio management
-    InCallManager.stop();
-    stopDurationTimer();
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-  }
-};
-
-const endCall = async (remoteEnded: boolean = false) => {
-  if (hasEndedCall.current) return;
-  hasEndedCall.current = true;
- 
-   stopDurationTimer();
-  InCallManager.stop(); // Immediately stop audio
-  InCallManager.setSpeakerphoneOn(false);
-
-  try {
-    // Stop recording first if active
-    if (isRecording) {
-      const savedPath = await stopRecording();
-      if (savedPath) {
-        await uploadRecording(savedPath);
-      }
-    }
+    await cleanupResources();
 
     // Send end call message if we're initiating the end
-    if (!remoteEnded && ws.current && ws.current.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({
-        type: 'end_call',
-        from: currentUserId,
-        to: otherUserId,
-      }));
+    if (
+      !remoteEnded &&
+      ws.current &&
+      ws.current.readyState === WebSocket.OPEN
+    ) {
+      ws.current.send(
+        JSON.stringify({
+          type: 'end_call',
+          from: currentUserId,
+          to: otherUserId,
+          endedBy: callerRole,
+        }),
+      );
     }
 
     // Close WebSocket connection
@@ -279,61 +234,94 @@ const endCall = async (remoteEnded: boolean = false) => {
       ws.current = null;
     }
 
-    // Close peer connection
-    if (pc.current) {
-      pc.current.close();
-      pc.current = null;
-    }
-
-    // Stop local media tracks
-    if (localStream) {
-      localStream.getTracks().forEach(track => {
-        track.stop();
-        track.enabled = false;
-      });
-      setLocalStream(null);
-    }
-
-    // Stop remote media tracks
-    if (remoteStream) {
-      remoteStream.getTracks().forEach(track => {
-        track.stop();
-        track.enabled = false;
-      });
-      setRemoteStream(null);
-    }
-
-    // Stop audio management
-    InCallManager.stop();
-    InCallManager.setSpeakerphoneOn(false);
-    stopDurationTimer();
-
-    // Navigate back
+    // Navigate back with appropriate message
     if (remoteEnded) {
       Alert.alert(
-        'Call Ended', 
-        'The other participant has ended the call',
-        [{ text: 'OK', onPress: () => navigation.goBack() }]
+        'Call Ended',
+        `The ${
+          callerRole === 'DOCTOR' ? 'doctor' : 'patient'
+        } has ended the call`,
+        [{ text: 'OK', onPress: () => navigation.goBack() }],
       );
     } else {
       navigation.goBack();
     }
-  } catch (error) {
-    console.error('Error ending call:', error);
-    navigation.goBack();
-  }
-};
+  };
 
+  const toggleMute = () => {
+    if (localStream) {
+      const audioTracks = localStream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        audioTracks[0].enabled = !audioTracks[0].enabled;
+        setIsMuted(!audioTracks[0].enabled);
+      }
+    }
+  };
 
+  const toggleSpeaker = () => {
+    const newState = !isSpeakerOn;
+    InCallManager.setSpeakerphoneOn(newState);
+    setIsSpeakerOn(newState);
+  };
 
+  const toggleVideo = () => {
+    if (localStream) {
+      const videoTracks = localStream.getVideoTracks();
+      if (videoTracks.length > 0) {
+        videoTracks[0].enabled = !videoTracks[0].enabled;
+        setIsVideoOn(videoTracks[0].enabled);
+      }
+    }
+  };
+
+  const switchCamera = async () => {
+    if (!localStream) return;
+
+    const newCameraType = isFrontCamera ? 'back' : 'front';
+    setIsFrontCamera(!isFrontCamera);
+
+    try {
+      const stream = await mediaDevices.getUserMedia({
+        video: {
+          facingMode: newCameraType === 'front' ? 'user' : 'environment',
+          width: 640,
+          height: 480,
+          frameRate: 30,
+        },
+        audio: true,
+      });
+
+      // Replace the video track
+      const videoTrack = stream.getVideoTracks()[0];
+      const sender = pc.current
+        ?.getSenders()
+        .find(s => s.track?.kind === 'video');
+      if (sender) {
+        sender.replaceTrack(videoTrack);
+      }
+
+      // Update local stream
+      localStream.getVideoTracks().forEach(track => track.stop());
+      localStream.addTrack(videoTrack);
+      setLocalStream(new MediaStream([...localStream.getTracks()]));
+    } catch (error) {
+      console.error('Error switching camera:', error);
+    }
+  };
 
   const setupWebSocket = () => {
-    ws.current = new WebSocket('ws://192.168.29.219:8080/signal');
+    ws.current = new WebSocket(`${WS_URL}/signal`);
 
     ws.current.onopen = () => {
       console.log('WebSocket connected');
-      ws.current?.send(JSON.stringify({ type: 'join', userId: currentUserId }));
-      
+      ws.current?.send(
+        JSON.stringify({
+          type: 'join',
+          userId: currentUserId,
+          role: callerRole,
+        }),
+      );
+
       if (isCaller) {
         setupMedia();
       } else {
@@ -348,7 +336,7 @@ const endCall = async (remoteEnded: boolean = false) => {
       }
     };
 
-    ws.current.onmessage = async (message) => {
+    ws.current.onmessage = async message => {
       const data = JSON.parse(message.data);
       console.log('WebSocket message received:', data.type);
 
@@ -356,30 +344,38 @@ const endCall = async (remoteEnded: boolean = false) => {
         switch (data.type) {
           case 'offer':
             if (!pc.current) return;
-            await pc.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+            await pc.current.setRemoteDescription(
+              new RTCSessionDescription(data.offer),
+            );
             const answer = await pc.current.createAnswer();
             await pc.current.setLocalDescription(answer);
-            ws.current?.send(JSON.stringify({
-              type: 'answer',
-              answer,
-              target: otherUserId,
-            }));
+            ws.current?.send(
+              JSON.stringify({
+                type: 'answer',
+                answer,
+                target: otherUserId,
+              }),
+            );
             setStatus('Connected');
             setCallConnected(true);
-            if (isCaller) startRecording();
+            if (isCaller) startAudioRecording();
             break;
 
           case 'answer':
             if (!pc.current) return;
-            await pc.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+            await pc.current.setRemoteDescription(
+              new RTCSessionDescription(data.answer),
+            );
             setStatus('Connected');
             setCallConnected(true);
-            if (!isCaller) startRecording();
+            if (!isCaller) startAudioRecording();
             break;
 
           case 'candidate':
             if (pc.current && data.candidate) {
-              await pc.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+              await pc.current.addIceCandidate(
+                new RTCIceCandidate(data.candidate),
+              );
             }
             break;
 
@@ -393,7 +389,7 @@ const endCall = async (remoteEnded: boolean = false) => {
       }
     };
 
-    ws.current.onerror = (error) => {
+    ws.current.onerror = error => {
       console.error('WebSocket error:', error);
       Alert.alert('Connection Error', 'Failed to connect to signaling server');
       endCall();
@@ -416,10 +412,15 @@ const endCall = async (remoteEnded: boolean = false) => {
         ]);
 
         if (
-          granted['android.permission.CAMERA'] !== PermissionsAndroid.RESULTS.GRANTED ||
-          granted['android.permission.RECORD_AUDIO'] !== PermissionsAndroid.RESULTS.GRANTED
+          granted['android.permission.CAMERA'] !==
+            PermissionsAndroid.RESULTS.GRANTED ||
+          granted['android.permission.RECORD_AUDIO'] !==
+            PermissionsAndroid.RESULTS.GRANTED
         ) {
-          Alert.alert('Permissions Required', 'Camera and Microphone access is needed');
+          Alert.alert(
+            'Permissions Required',
+            'Camera and Microphone access is needed',
+          );
           endCall();
           return;
         }
@@ -438,7 +439,7 @@ const endCall = async (remoteEnded: boolean = false) => {
       if (!pc.current) {
         pc.current = new RTCPeerConnection(configuration);
 
-        (pc.current as any).onicecandidate = (event:any) => {
+        (pc.current as any).onicecandidate = (event: any) => {
           if (event.candidate) {
             ws.current?.send(
               JSON.stringify({
@@ -450,20 +451,18 @@ const endCall = async (remoteEnded: boolean = false) => {
           }
         };
 
-        (pc.current as any).ontrack = (event:any) => {
+        (pc.current as any).ontrack = (event: any) => {
           if (event.streams && event.streams.length > 0) {
             const remote = event.streams[0];
             setRemoteStream(remote);
             setStatus('Connected');
             setCallConnected(true);
-            
+
             // Start timer when remote stream is received
             if (!callStartRef.current) {
-              callStartRef.current = new Date();
-              setCallStartTime(new Date());
               startDurationTimer();
             }
-            
+
             InCallManager.start({ media: 'audio' });
             InCallManager.setSpeakerphoneOn(true);
           }
@@ -471,14 +470,7 @@ const endCall = async (remoteEnded: boolean = false) => {
       }
 
       stream.getTracks().forEach(track => {
-        const senders = pc.current?.getSenders() || [];
-        const existingSender = senders.find(s => s.track?.kind === track.kind);
-        
-        if (existingSender) {
-          existingSender.replaceTrack(track);
-        } else {
-          pc.current?.addTrack(track, stream);
-        }
+        pc.current?.addTrack(track, stream);
       });
 
       setLocalStream(stream);
@@ -501,33 +493,9 @@ const endCall = async (remoteEnded: boolean = false) => {
     }
   };
 
-  const toggleMute = () => {
-    if (localStream) {
-      const audioTracks = localStream.getAudioTracks();
-      if (audioTracks.length > 0) {
-        audioTracks[0].enabled = !audioTracks[0].enabled;
-        setIsMuted(!audioTracks[0].enabled);
-      }
-    }
-  };
-
-  const toggleSpeaker = () => {
-    setIsSpeakerOn(prev => {
-      const newState = !prev;
-      InCallManager.setSpeakerphoneOn(newState);
-      return newState;
-    });
-  };
-
-  const switchCamera = () => {
-    const newCameraType = isFrontCamera ? 'back' : 'front';
-    setIsFrontCamera(!isFrontCamera);
-    setupMedia(newCameraType);
-  };
-
   useEffect(() => {
     setupWebSocket();
-    
+
     return () => {
       if (!hasEndedCall.current) {
         endCall();
@@ -551,7 +519,7 @@ const endCall = async (remoteEnded: boolean = false) => {
         </View>
       )}
 
-      {localStream && (
+      {localStream && isVideoOn && (
         <RTCView
           streamURL={localStream.toURL()}
           style={styles.localVideo}
@@ -582,12 +550,24 @@ const endCall = async (remoteEnded: boolean = false) => {
           </Text>
         </TouchableOpacity>
 
+        <TouchableOpacity onPress={toggleVideo} style={styles.controlButton}>
+          <Text style={styles.controlButtonEmoji}>
+            {isVideoOn ? '📹' : '📷'}
+          </Text>
+          <Text style={styles.controlButtonText}>
+            {isVideoOn ? 'Video Off' : 'Video On'}
+          </Text>
+        </TouchableOpacity>
+
         <TouchableOpacity onPress={switchCamera} style={styles.controlButton}>
           <Text style={styles.controlButtonEmoji}>🔄</Text>
           <Text style={styles.controlButtonText}>Switch</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity onPress={() => endCall()} style={styles.endCallButton}>
+        <TouchableOpacity
+          onPress={() => endCall()}
+          style={styles.endCallButton}
+        >
           <Text style={styles.controlButtonEmoji}>📞</Text>
           <Text style={styles.endCallButtonText}>End</Text>
         </TouchableOpacity>
@@ -597,8 +577,15 @@ const endCall = async (remoteEnded: boolean = false) => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  remoteVideo: { flex: 1, backgroundColor: '#000' },
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+    position: 'relative',
+  },
+  remoteVideo: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
   remoteVideoPlaceholder: {
     flex: 1,
     justifyContent: 'center',
@@ -616,7 +603,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#fff',
   },
-  statusText: { color: 'white', fontSize: 18 },
+  statusText: {
+    color: 'white',
+    fontSize: 18,
+  },
   durationContainer: {
     position: 'absolute',
     top: 50,
@@ -647,7 +637,9 @@ const styles = StyleSheet.create({
     height: 70,
     borderRadius: 35,
   },
-  controlButtonEmoji: { fontSize: 24 },
+  controlButtonEmoji: {
+    fontSize: 24,
+  },
   controlButtonText: {
     color: 'white',
     fontSize: 12,

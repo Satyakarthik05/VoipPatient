@@ -8,6 +8,7 @@ import {
   Alert,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { API_URL } from '../services/service';
 
 type Props = NativeStackScreenProps<any, 'PatientLogin'>;
 
@@ -17,7 +18,7 @@ const LoginScreen: React.FC<Props> = ({ navigation }) => {
 
   const handleLogin = async () => {
     try {
-      const res = await fetch('http://192.168.29.219:8080/api/auth/login', {
+      const res = await fetch(`${API_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -29,13 +30,13 @@ const LoginScreen: React.FC<Props> = ({ navigation }) => {
 
       if (res.ok) {
         const userDetails = await res.json();
-        if (userDetails.role !== 'patient') {
+        if (userDetails.role !== 'PATIENT') {
           Alert.alert('Access Denied', 'This login is for patients only.');
           return;
         }
         
         Alert.alert('Login Success', `Welcome ${userDetails.fullName}`);
-        navigation.navigate('PatientHome', {
+        navigation.navigate('Home', {
           username,
           role: userDetails.role,
           id: userDetails.id,
