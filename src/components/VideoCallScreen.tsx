@@ -7,6 +7,7 @@ import {
   Alert,
   Platform,
   PermissionsAndroid,
+  Linking,
 } from 'react-native';
 import {
   RTCPeerConnection,
@@ -18,9 +19,12 @@ import {
 } from 'react-native-webrtc';
 import InCallManager from 'react-native-incall-manager';
 import AudioRecorderPlayer, {
+  RecordBackType,
+  PlayBackType,
+  AVEncoderAudioQualityIOSType,
   AudioEncoderAndroidType,
   AudioSourceAndroidType,
-  OutputFormatAndroidType,
+  AVEncodingOption,
 } from 'react-native-audio-recorder-player';
 
 import RNFS from 'react-native-fs';
@@ -41,6 +45,32 @@ interface VideoCallScreenProps {
   navigation: any;
 }
 
+// Type declarations
+declare module 'react-native' {
+  interface PermissionsAndroidStatic {
+    shouldShowRequestPermissionRationale(permission: string): Promise<boolean>;
+  }
+}
+
+declare module 'react-native-audio-recorder-player' {
+  interface AudioRecorderPlayer {
+    dirs?: {
+      CacheDir: string;
+      DocumentDir: string;
+    };
+  }
+}
+
+type AndroidPermission =
+  | 'android.permission.RECORD_AUDIO'
+  | 'android.permission.READ_MEDIA_AUDIO'
+  | 'android.permission.READ_EXTERNAL_STORAGE'
+  | 'android.permission.WRITE_EXTERNAL_STORAGE';
+
+type ErrorWithMessage = {
+  message: string;
+};
+
 const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   route,
   navigation,
@@ -58,56 +88,180 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const [isFrontCamera, setIsFrontCamera] = useState(true);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
-  const [audioPath, setAudioPath] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [callStartTime, setCallStartTime] = useState<Date | null>(null);
   const [callDuration, setCallDuration] = useState('00:00:00');
+  const [recordTime, setRecordTime] = useState('00:00:00');
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [currentRecordingPath, setCurrentRecordingPath] = useState<string | null>(null);
+  const audioRecorderPlayer = useRef(AudioRecorderPlayer).current;
 
   const pc = useRef<RTCPeerConnection | null>(null);
   const ws = useRef<WebSocket | null>(null);
   const hasEndedCall = useRef(false);
   const durationInterval = useRef<NodeJS.Timeout | null>(null);
   const callStartRef = useRef<Date | null>(null);
-const audioRecorderPlayer = useRef(AudioRecorderPlayer);
-
 
   const configuration = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   };
 
-  const prepareAudioPath = () => {
-    const path = `${RNFS.DocumentDirectoryPath}/call_${currentUserId}_${Date.now()}.mp3`;
-    setAudioPath(path);
-    return path;
+  // Helper function to properly type errors
+  const isErrorWithMessage = (error: unknown): error is ErrorWithMessage => {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'message' in error &&
+      typeof (error as Record<string, unknown>).message === 'string'
+    );
   };
 
-  const startAudioRecording = async () => {
+  const getErrorMessage = (error: unknown): string => {
+    if (isErrorWithMessage(error)) return error.message;
+    return 'An unknown error occurred';
+  };
+
+  useEffect(() => {
+    audioRecorderPlayer.setSubscriptionDuration(0.1);
+    return () => {
+      cleanupResources();
+    };
+  }, []);
+
+  const getAudioFilePath = async (): Promise<string> => {
+    const fileName = `recording_${Date.now()}.mp3`;
+    let basePath = RNFS.CachesDirectoryPath;
+    
+    // Ensure the directory exists
     try {
-      const path = prepareAudioPath();
-      
-      await audioRecorderPlayer.current.startRecorder(path, {
-        AudioEncoderAndroid: AudioEncoderAndroidType.AAC,
-        AudioSourceAndroid: AudioSourceAndroidType.MIC,
-        OutputFormatAndroid: OutputFormatAndroidType.MPEG_4,
-      });
-      
-      setIsRecording(true);
+      const dirExists = await RNFS.exists(basePath);
+      if (!dirExists) {
+        await RNFS.mkdir(basePath);
+      }
+      return `${basePath}/${fileName}`;
     } catch (error) {
-      console.error('Failed to start audio recording:', error);
+      console.error('Error creating directory:', error);
+      throw new Error('Failed to create recording directory');
     }
   };
 
-  const stopAudioRecording = async () => {
-    if (!isRecording) return null;
+  const getRequiredPermissions = (): AndroidPermission[] => {
+    const sdkInt =
+      typeof Platform.Version === 'string'
+        ? parseInt(Platform.Version, 10)
+        : Platform.Version;
+
+    const permissions: AndroidPermission[] = [
+      'android.permission.RECORD_AUDIO',
+    ];
+
+    if (sdkInt < 33) {
+      permissions.push('android.permission.WRITE_EXTERNAL_STORAGE');
+    }
+
+    return permissions;
+  };
+
+  const requestPermissions = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
 
     try {
-      const result = await audioRecorderPlayer.current.stopRecorder();
-      setIsRecording(false);
-      return result;
+      const permissions = getRequiredPermissions();
+      const grantedStatus = await Promise.all(
+        permissions.map(perm => PermissionsAndroid.check(perm))
+      );
+
+      if (grantedStatus.every(status => status)) {
+        return true;
+      }
+
+      const results = await PermissionsAndroid.requestMultiple(permissions);
+      const allGranted = permissions.every(
+        perm => results[perm] === PermissionsAndroid.RESULTS.GRANTED
+      );
+
+      if (!allGranted) {
+        const neverAskAgainPermissions = permissions.filter(
+          perm => results[perm] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
+        );
+        if (neverAskAgainPermissions.length > 0) {
+          setPermissionDenied(true);
+          Alert.alert(
+            'Permission Required',
+            'Microphone access is required for call recording',
+            [
+              { text: 'Continue Without', style: 'cancel' },
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            ],
+          );
+        }
+      }
+      return allGranted;
     } catch (error) {
-      console.error('Failed to stop audio recording:', error);
+      console.error('Permission error:', error);
+      return false;
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      const hasPermission = await requestPermissions();
+      if (!hasPermission && permissionDenied) {
+        return;
+      }
+
+      const path = await getAudioFilePath();
+      setCurrentRecordingPath(path);
+
+      const audioSet = {
+        AudioEncoderAndroid: AudioEncoderAndroidType.AAC,
+        AudioSourceAndroid: AudioSourceAndroidType.MIC,
+        AVEncoderAudioQualityKeyIOS: AVEncoderAudioQualityIOSType.high,
+        AVNumberOfChannelsKeyIOS: 2,
+        AVFormatIDKeyIOS: 'aac' as AVEncodingOption,
+      };
+
+      await audioRecorderPlayer.startRecorder(path, audioSet);
+      audioRecorderPlayer.addRecordBackListener((e: RecordBackType) => {
+        setRecordTime(audioRecorderPlayer.mmssss(Math.floor(e.currentPosition)));
+      });
+
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Recording error:', error);
+      Alert.alert('Error', 'Could not start recording');
+    }
+  };
+
+  const stopRecording = async (): Promise<string | null> => {
+    try {
+      if (!currentRecordingPath) {
+        throw new Error('No active recording path');
+      }
+
+      await audioRecorderPlayer.stopRecorder();
+      audioRecorderPlayer.removeRecordBackListener();
       setIsRecording(false);
+      setRecordTime('00:00:00');
+
+      // Verify the file exists and has content
+      const fileExists = await RNFS.exists(currentRecordingPath);
+      if (!fileExists) {
+        throw new Error('Recording file not found');
+      }
+
+      const fileInfo = await RNFS.stat(currentRecordingPath);
+      if (fileInfo.size === 0) {
+        await RNFS.unlink(currentRecordingPath);
+        throw new Error('Recording file is empty');
+      }
+
+      return currentRecordingPath;
+    } catch (error) {
+      console.error('Stop recording error:', error);
       return null;
+    } finally {
+      setCurrentRecordingPath(null);
     }
   };
 
@@ -134,13 +288,50 @@ const audioRecorderPlayer = useRef(AudioRecorderPlayer);
       });
 
       if (!response.ok) {
-        throw new Error('Failed to upload recording');
+        throw new Error(`Server responded with status ${response.status}`);
       }
+
+      // Clean up file after successful upload
+      await RNFS.unlink(filePath).catch(e => 
+        console.log('Error deleting recording file:', e)
+      );
 
       return true;
     } catch (error) {
       console.error('Upload error:', error);
       return false;
+    }
+  };
+
+  const cleanupResources = async () => {
+    try {
+      if (isRecording) {
+        const savedPath = await stopRecording();
+        if (savedPath) {
+          await uploadAudioRecording(savedPath);
+        }
+      }
+
+      if (pc.current) {
+        pc.current.close();
+        pc.current = null;
+      }
+
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        setLocalStream(null);
+      }
+
+      if (remoteStream) {
+        remoteStream.getTracks().forEach(track => track.stop());
+        setRemoteStream(null);
+      }
+
+      InCallManager.stop();
+      InCallManager.setSpeakerphoneOn(false);
+      stopDurationTimer();
+    } catch (error) {
+      console.error('Error during cleanup:', error);
     }
   };
 
@@ -169,42 +360,6 @@ const audioRecorderPlayer = useRef(AudioRecorderPlayer);
     }
   };
 
-  const cleanupResources = async () => {
-    try {
-      // Stop audio recording if active
-      if (isRecording) {
-        const savedPath = await stopAudioRecording();
-        if (savedPath) {
-          await uploadAudioRecording(savedPath);
-        }
-      }
-
-      // Close peer connection
-      if (pc.current) {
-        pc.current.close();
-        pc.current = null;
-      }
-
-      // Stop local media
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-        setLocalStream(null);
-      }
-
-      // Stop remote media
-      if (remoteStream) {
-        remoteStream.getTracks().forEach(track => track.stop());
-        setRemoteStream(null);
-      }
-
-      // Stop audio management
-      InCallManager.stop();
-      InCallManager.setSpeakerphoneOn(false);
-      stopDurationTimer();
-    } catch (error) {
-      console.error('Error during cleanup:', error);
-    }
-  };
 
   const endCall = async (remoteEnded: boolean = false) => {
     if (hasEndedCall.current) return;
@@ -358,7 +513,7 @@ const audioRecorderPlayer = useRef(AudioRecorderPlayer);
             );
             setStatus('Connected');
             setCallConnected(true);
-            if (isCaller) startAudioRecording();
+            if (isCaller) startRecording();
             break;
 
           case 'answer':
@@ -368,7 +523,7 @@ const audioRecorderPlayer = useRef(AudioRecorderPlayer);
             );
             setStatus('Connected');
             setCallConnected(true);
-            if (!isCaller) startAudioRecording();
+            if (!isCaller) startRecording();
             break;
 
           case 'candidate':
