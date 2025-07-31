@@ -8,6 +8,7 @@ import {
   Platform,
   PermissionsAndroid,
   Linking,
+  Modal
 } from 'react-native';
 import {
   RTCPeerConnection,
@@ -95,6 +96,10 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [currentRecordingPath, setCurrentRecordingPath] = useState<string | null>(null);
   const audioRecorderPlayer = useRef(AudioRecorderPlayer).current;
+  const [isRemoteMuted, setIsRemoteMuted] = useState(false);
+  const [showUnmuteRequest, setShowUnmuteRequest] = useState(false);
+  const [showUnmuteModal, setShowUnmuteModal] = useState(false);
+  const [videoViewsSwapped, setVideoViewsSwapped] = useState(false);
 
   const pc = useRef<RTCPeerConnection | null>(null);
   const ws = useRef<WebSocket | null>(null);
@@ -127,6 +132,9 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       cleanupResources();
     };
   }, []);
+
+
+  
 
   const getAudioFilePath = async (): Promise<string> => {
     const fileName = `recording_${Date.now()}.mp3`;
@@ -403,12 +411,59 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     }
   };
 
+
   const toggleMute = () => {
     if (localStream) {
       const audioTracks = localStream.getAudioTracks();
       if (audioTracks.length > 0) {
         audioTracks[0].enabled = !audioTracks[0].enabled;
-        setIsMuted(!audioTracks[0].enabled);
+        const newMuteStatus = !audioTracks[0].enabled;
+        setIsMuted(newMuteStatus);
+        
+        // Send mute status to other user
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          ws.current.send(
+            JSON.stringify({
+              type: 'mute_status',
+              from: currentUserId,
+              to: otherUserId,
+              isMuted: newMuteStatus,
+            })
+          );
+        }
+      }
+    }
+  };
+
+
+
+   const requestUnmute = () => {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(
+        JSON.stringify({
+          type: 'unmute_request',
+          from: currentUserId,
+          to: otherUserId,
+        })
+      );
+      setShowUnmuteRequest(false);
+    }
+  };
+
+  const handleUnmuteRequest = (accept: boolean) => {
+    setShowUnmuteModal(false);
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(
+        JSON.stringify({
+          type: 'unmute_response',
+          from: currentUserId,
+          to: otherUserId,
+          accepted: accept,
+        })
+      );
+      
+      if (accept) {
+        toggleMute(); // Unmute if accepting the request
       }
     }
   };
@@ -533,7 +588,24 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
               );
             }
             break;
+             case 'mute_status':
+            setIsRemoteMuted(data.isMuted);
+            setShowUnmuteRequest(false); // Hide request button if remote user unmutes
+            break;
 
+          case 'unmute_request':
+            if (isMuted) {
+              setShowUnmuteModal(true);
+            }
+            break;
+
+          case 'unmute_response':
+            if (data.accepted) {
+              Alert.alert('Unmute Request Accepted', 'The other user has unmuted');
+            } else {
+              Alert.alert('Unmute Request Denied', 'The other user chose to remain muted');
+            }
+            break;
           case 'end_call':
             endCall(true);
             break;
@@ -660,6 +732,55 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
 
   return (
     <View style={styles.container}>
+
+{isRemoteMuted && !isMuted && ( 
+  <View style={styles.remoteMuteIndicator}>
+    <Text style={styles.remoteMuteText}>Other user is muted</Text>
+    {!isCaller && (
+      <TouchableOpacity 
+        onPress={() => setShowUnmuteRequest(true)}
+        style={styles.unmuteRequestButton}
+      >
+        <Text style={styles.unmuteRequestText}>Request Unmute</Text>
+      </TouchableOpacity>
+    )}
+  </View>
+)}
+{isMuted && (
+  <View style={[styles.remoteMuteIndicator, {backgroundColor: 'rgba(0,0,255,0.7)'}]}>
+    <Text style={styles.remoteMuteText}>You are muted</Text>
+  </View>
+)}
+
+       <Modal
+        visible={showUnmuteModal}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Unmute Request</Text>
+            <Text style={styles.modalText}>
+              The other user is requesting you to unmute
+            </Text>
+            <View style={styles.modalButtonContainer}>
+              <TouchableOpacity 
+                onPress={() => handleUnmuteRequest(true)}
+                style={[styles.modalButton, styles.acceptButton]}
+              >
+                <Text style={styles.modalButtonText}>Accept</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={() => handleUnmuteRequest(false)}
+                style={[styles.modalButton, styles.declineButton]}
+              >
+                <Text style={styles.modalButtonText}>Decline</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {remoteStream ? (
         <RTCView
           streamURL={remoteStream.toURL()}
@@ -812,6 +933,74 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 12,
     marginTop: 4,
+  },
+ remoteMuteIndicator: {
+  position: 'absolute',
+  top: 80,
+  alignSelf: 'center',
+  backgroundColor: 'rgba(255,0,0,0.7)',
+  padding: 8,
+  borderRadius: 20,
+  flexDirection: 'row',
+  alignItems: 'center',
+  zIndex: 100, // Ensure it appears above other elements
+},
+  remoteMuteText: {
+    color: 'white',
+    fontSize: 14,
+    marginRight: 10,
+  },
+  unmuteRequestButton: {
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+   
+  },
+  unmuteRequestText: {
+    color: 'white',
+    fontSize: 12,
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    width: '80%',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  modalText: {
+    fontSize: 16,
+    marginBottom: 20,
+  },
+  modalButtonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  modalButton: {
+    padding: 10,
+    borderRadius: 5,
+    width: '40%',
+    alignItems: 'center',
+  },
+  acceptButton: {
+    backgroundColor: '#4CAF50',
+  },
+  declineButton: {
+    backgroundColor: '#F44336',
+  },
+  modalButtonText: {
+    color: 'white',
+    fontWeight: 'bold',
   },
 });
 
