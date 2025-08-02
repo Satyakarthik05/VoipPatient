@@ -1,2 +1,2 @@
-export const API_URL = 'http://192.168.29.219:8080';
-export const WS_URL = 'ws://192.168.29.219:8080'
+export const API_URL = 'https://voipcallbackend.onrender.com';
+export const WS_URL = 'wss://voipcallbackend.onrender.com'; 

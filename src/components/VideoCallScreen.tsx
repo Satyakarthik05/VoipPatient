@@ -8,7 +8,8 @@ import {
   Platform,
   PermissionsAndroid,
   Linking,
-  Modal
+  Modal,
+  Animated,
 } from 'react-native';
 import {
   RTCPeerConnection,
@@ -27,6 +28,11 @@ import AudioRecorderPlayer, {
   AudioSourceAndroidType,
   AVEncodingOption,
 } from 'react-native-audio-recorder-player';
+import LinearGradient from 'react-native-linear-gradient';
+import Icon from 'react-native-vector-icons/MaterialIcons';
+import Icon2 from 'react-native-vector-icons/FontAwesome';
+import Icon3 from 'react-native-vector-icons/MaterialCommunityIcons';
+import Sound from 'react-native-sound';
 
 import RNFS from 'react-native-fs';
 import moment from 'moment';
@@ -94,12 +100,18 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const [callDuration, setCallDuration] = useState('00:00:00');
   const [recordTime, setRecordTime] = useState('00:00:00');
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [currentRecordingPath, setCurrentRecordingPath] = useState<string | null>(null);
+  const [currentRecordingPath, setCurrentRecordingPath] = useState<
+    string | null
+  >(null);
   const audioRecorderPlayer = useRef(AudioRecorderPlayer).current;
   const [isRemoteMuted, setIsRemoteMuted] = useState(false);
   const [showUnmuteRequest, setShowUnmuteRequest] = useState(false);
   const [showUnmuteModal, setShowUnmuteModal] = useState(false);
   const [videoViewsSwapped, setVideoViewsSwapped] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // const [videoViewsSwapped, setVideoViewsSwapped] = useState(false);
+  const controlsPosition = useRef(new Animated.Value(0)).current;
 
   const pc = useRef<RTCPeerConnection | null>(null);
   const ws = useRef<WebSocket | null>(null);
@@ -110,6 +122,40 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
   const configuration = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   };
+  const waitingSound = useRef<Sound | null>(null);
+
+  // Initialize waiting sound
+  const initWaitingSound = () => {
+    waitingSound.current = new Sound(
+      'waiting.mp3',
+      Sound.MAIN_BUNDLE,
+      error => {
+        if (error) {
+          console.error('Failed to load waiting sound', error);
+          return;
+        }
+        if (!callConnected && !hasEndedCall.current) {
+          waitingSound.current?.setNumberOfLoops(-1);
+          waitingSound.current?.play();
+        }
+      },
+    );
+  };
+
+  // Update the cleanup effect
+  useEffect(() => {
+    initWaitingSound();
+
+    return () => {
+      if (waitingSound.current) {
+        waitingSound.current.stop();
+        waitingSound.current.release();
+      }
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Helper function to properly type errors
   const isErrorWithMessage = (error: unknown): error is ErrorWithMessage => {
@@ -133,13 +179,10 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     };
   }, []);
 
-
-  
-
   const getAudioFilePath = async (): Promise<string> => {
     const fileName = `recording_${Date.now()}.mp3`;
     let basePath = RNFS.CachesDirectoryPath;
-    
+
     // Ensure the directory exists
     try {
       const dirExists = await RNFS.exists(basePath);
@@ -176,7 +219,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     try {
       const permissions = getRequiredPermissions();
       const grantedStatus = await Promise.all(
-        permissions.map(perm => PermissionsAndroid.check(perm))
+        permissions.map(perm => PermissionsAndroid.check(perm)),
       );
 
       if (grantedStatus.every(status => status)) {
@@ -185,12 +228,12 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
 
       const results = await PermissionsAndroid.requestMultiple(permissions);
       const allGranted = permissions.every(
-        perm => results[perm] === PermissionsAndroid.RESULTS.GRANTED
+        perm => results[perm] === PermissionsAndroid.RESULTS.GRANTED,
       );
 
       if (!allGranted) {
         const neverAskAgainPermissions = permissions.filter(
-          perm => results[perm] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
+          perm => results[perm] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN,
         );
         if (neverAskAgainPermissions.length > 0) {
           setPermissionDenied(true);
@@ -231,7 +274,9 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
 
       await audioRecorderPlayer.startRecorder(path, audioSet);
       audioRecorderPlayer.addRecordBackListener((e: RecordBackType) => {
-        setRecordTime(audioRecorderPlayer.mmssss(Math.floor(e.currentPosition)));
+        setRecordTime(
+          audioRecorderPlayer.mmssss(Math.floor(e.currentPosition)),
+        );
       });
 
       setIsRecording(true);
@@ -300,8 +345,8 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       }
 
       // Clean up file after successful upload
-      await RNFS.unlink(filePath).catch(e => 
-        console.log('Error deleting recording file:', e)
+      await RNFS.unlink(filePath).catch(e =>
+        console.log('Error deleting recording file:', e),
       );
 
       return true;
@@ -368,12 +413,60 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     }
   };
 
+ useEffect(() => {
+  if (callConnected) {
+    controlsTimeoutRef.current = setTimeout(() => {
+      hideControls();
+    }, 3000);
+  }
+  return () => {
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+  };
+}, [callConnected]);
+
+ const handleScreenPress = () => {
+  // Show controls with animation
+  Animated.timing(controlsPosition, {
+    toValue: 0,
+    duration: 300,
+    useNativeDriver: true,
+  }).start(() => {
+    setControlsVisible(true);
+  });
+  
+  // Auto-hide after 3 seconds
+  if (controlsTimeoutRef.current) {
+    clearTimeout(controlsTimeoutRef.current);
+  }
+  controlsTimeoutRef.current = setTimeout(() => {
+    hideControls();
+  }, 3000);
+};
+
+
+const hideControls = () => {
+  Animated.timing(controlsPosition, {
+    toValue: 100, // Adjust this value based on your controls height
+    duration: 500,
+    useNativeDriver: true,
+  }).start(() => {
+    setControlsVisible(false);
+  });
+};
+
 
   const endCall = async (remoteEnded: boolean = false) => {
     if (hasEndedCall.current) return;
     hasEndedCall.current = true;
 
     await cleanupResources();
+    if (waitingSound.current) {
+      waitingSound.current.stop();
+      waitingSound.current.release();
+      waitingSound.current = null;
+    }
 
     // Send end call message if we're initiating the end
     if (
@@ -411,7 +504,6 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
     }
   };
 
-
   const toggleMute = () => {
     if (localStream) {
       const audioTracks = localStream.getAudioTracks();
@@ -419,7 +511,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         audioTracks[0].enabled = !audioTracks[0].enabled;
         const newMuteStatus = !audioTracks[0].enabled;
         setIsMuted(newMuteStatus);
-        
+
         // Send mute status to other user
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
           ws.current.send(
@@ -428,23 +520,21 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
               from: currentUserId,
               to: otherUserId,
               isMuted: newMuteStatus,
-            })
+            }),
           );
         }
       }
     }
   };
 
-
-
-   const requestUnmute = () => {
+  const requestUnmute = () => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(
         JSON.stringify({
           type: 'unmute_request',
           from: currentUserId,
           to: otherUserId,
-        })
+        }),
       );
       setShowUnmuteRequest(false);
     }
@@ -459,9 +549,9 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
           from: currentUserId,
           to: otherUserId,
           accepted: accept,
-        })
+        }),
       );
-      
+
       if (accept) {
         toggleMute(); // Unmute if accepting the request
       }
@@ -483,14 +573,11 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       }
     }
   };
-
   const switchCamera = async () => {
     if (!localStream) return;
 
-    const newCameraType = isFrontCamera ? 'back' : 'front';
-    setIsFrontCamera(!isFrontCamera);
-
     try {
+      const newCameraType = isFrontCamera ? 'back' : 'front';
       const stream = await mediaDevices.getUserMedia({
         video: {
           facingMode: newCameraType === 'front' ? 'user' : 'environment',
@@ -501,21 +588,42 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
         audio: true,
       });
 
-      // Replace the video track
-      const videoTrack = stream.getVideoTracks()[0];
-      const sender = pc.current
-        ?.getSenders()
-        .find(s => s.track?.kind === 'video');
-      if (sender) {
-        sender.replaceTrack(videoTrack);
+      // Get the new video track
+      const newVideoTrack = stream.getVideoTracks()[0];
+
+      // Replace the track in the peer connection
+      const senders = pc.current?.getSenders();
+      const videoSender = senders?.find(s => s.track?.kind === 'video');
+
+      if (videoSender) {
+        await videoSender.replaceTrack(newVideoTrack);
       }
 
-      // Update local stream
-      localStream.getVideoTracks().forEach(track => track.stop());
-      localStream.addTrack(videoTrack);
-      setLocalStream(new MediaStream([...localStream.getTracks()]));
+      // Stop the old tracks
+      localStream.getTracks().forEach(track => track.stop());
+
+      // Create new stream with new video track and existing audio track
+      const newStream = new MediaStream();
+      newStream.addTrack(newVideoTrack);
+
+      // Keep the same audio track if it exists
+      const audioTracks = localStream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        newStream.addTrack(audioTracks[0]);
+      }
+
+      // Update local stream state
+      setLocalStream(newStream);
+      setIsFrontCamera(!isFrontCamera);
+
+      // Stop the unused tracks from the new stream
+      stream
+        .getTracks()
+        .filter(track => track !== newVideoTrack)
+        .forEach(track => track.stop());
     } catch (error) {
       console.error('Error switching camera:', error);
+      Alert.alert('Camera Error', 'Failed to switch camera');
     }
   };
 
@@ -567,6 +675,12 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
               }),
             );
             setStatus('Connected');
+            if (waitingSound.current) {
+              waitingSound.current.stop();
+              waitingSound.current.release();
+              waitingSound.current = null;
+            }
+
             setCallConnected(true);
             if (isCaller) startRecording();
             break;
@@ -577,6 +691,12 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
               new RTCSessionDescription(data.answer),
             );
             setStatus('Connected');
+            if (waitingSound.current) {
+              waitingSound.current.stop();
+              waitingSound.current.release();
+              waitingSound.current = null;
+            }
+
             setCallConnected(true);
             if (!isCaller) startRecording();
             break;
@@ -588,7 +708,7 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
               );
             }
             break;
-             case 'mute_status':
+          case 'mute_status':
             setIsRemoteMuted(data.isMuted);
             setShowUnmuteRequest(false); // Hide request button if remote user unmutes
             break;
@@ -601,9 +721,15 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
 
           case 'unmute_response':
             if (data.accepted) {
-              Alert.alert('Unmute Request Accepted', 'The other user has unmuted');
+              Alert.alert(
+                'Unmute Request Accepted',
+                'The other user has unmuted',
+              );
             } else {
-              Alert.alert('Unmute Request Denied', 'The other user chose to remain muted');
+              Alert.alert(
+                'Unmute Request Denied',
+                'The other user chose to remain muted',
+              );
             }
             break;
           case 'end_call':
@@ -729,134 +855,242 @@ const VideoCallScreen: React.FC<VideoCallScreenProps> = ({
       }
     };
   }, []);
-
   return (
-    <View style={styles.container}>
-
-{isRemoteMuted && !isMuted && ( 
-  <View style={styles.remoteMuteIndicator}>
-    <Text style={styles.remoteMuteText}>Other user is muted</Text>
-    {!isCaller && (
-      <TouchableOpacity 
-        onPress={() => setShowUnmuteRequest(true)}
-        style={styles.unmuteRequestButton}
+    <TouchableOpacity
+      activeOpacity={1}
+      onPress={handleScreenPress}
+      style={{ flex: 1 }}
+    >
+      <LinearGradient
+        colors={['#0f2027', '#203a43', '#2c5364']}
+        style={styles.container}
       >
-        <Text style={styles.unmuteRequestText}>Request Unmute</Text>
-      </TouchableOpacity>
-    )}
-  </View>
-)}
-{isMuted && (
-  <View style={[styles.remoteMuteIndicator, {backgroundColor: 'rgba(0,0,255,0.7)'}]}>
-    <Text style={styles.remoteMuteText}>You are muted</Text>
-  </View>
-)}
-
-       <Modal
-        visible={showUnmuteModal}
-        transparent={true}
-        animationType="slide"
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Unmute Request</Text>
-            <Text style={styles.modalText}>
-              The other user is requesting you to unmute
+        {/* Remote video or placeholder */}
+        {remoteStream ? (
+          <RTCView
+            streamURL={remoteStream.toURL()}
+            style={styles.remoteVideo}
+            objectFit="cover"
+          />
+        ) : (
+          <LinearGradient
+            colors={['rgba(15, 32, 39, 0.8)', 'rgba(32, 58, 67, 0.8)']}
+            style={styles.remoteVideoPlaceholder}
+          >
+            <View style={styles.userAvatar}>
+              <Icon2 name="user" size={80} color="#fff" />
+            </View>
+            <Text style={styles.statusText}>
+              {status} {otherUserName ? `with ${otherUserName}` : ''}
             </Text>
-            <View style={styles.modalButtonContainer}>
-              <TouchableOpacity 
-                onPress={() => handleUnmuteRequest(true)}
-                style={[styles.modalButton, styles.acceptButton]}
+          </LinearGradient>
+        )}
+
+        {/* Local video */}
+        {localStream && isVideoOn && (
+          <View style={styles.localVideoContainer}>
+            <RTCView
+              streamURL={localStream.toURL()}
+              style={styles.localVideo}
+              objectFit="cover"
+              mirror={isFrontCamera}
+              zOrder={1}
+            />
+          </View>
+        )}
+
+        {/* Call duration */}
+        <View style={styles.durationContainer}>
+          <Icon name="access-time" size={20} color="#fff" />
+          <Text style={styles.durationText}>{callDuration}</Text>
+        </View>
+
+        {/* Mute indicators */}
+        {isRemoteMuted && !isMuted && (
+          <View style={styles.remoteMuteIndicator}>
+            <Icon name="mic-off" size={16} color="#fff" />
+            <Text style={styles.remoteMuteText}>Other user is muted</Text>
+            {!isCaller && (
+              <TouchableOpacity
+                onPress={() => setShowUnmuteRequest(true)}
+                style={styles.unmuteRequestButton}
               >
-                <Text style={styles.modalButtonText}>Accept</Text>
+                <Text style={styles.unmuteRequestText}>Request Unmute</Text>
               </TouchableOpacity>
-              <TouchableOpacity 
-                onPress={() => handleUnmuteRequest(false)}
-                style={[styles.modalButton, styles.declineButton]}
+            )}
+          </View>
+        )}
+
+        {isMuted && (
+          <View
+            style={[
+              styles.remoteMuteIndicator,
+              { backgroundColor: 'rgba(0,100,255,0.7)' },
+            ]}
+          >
+            <Icon name="mic-off" size={16} color="#fff" />
+            <Text style={styles.remoteMuteText}>You are muted</Text>
+          </View>
+        )}
+
+        {/* Unmute request modal */}
+        <Modal
+          visible={showUnmuteModal}
+          transparent={true}
+          animationType="fade"
+        >
+          <View style={styles.modalOverlay}>
+            <LinearGradient
+              colors={['#2c5364', '#203a43']}
+              style={styles.modalContent}
+            >
+              <View style={styles.modalHeader}>
+                <Icon name="info-outline" size={24} color="#fff" />
+                <Text style={styles.modalTitle}>Unmute Request</Text>
+              </View>
+              <Text style={styles.modalText}>
+                The other user is requesting you to unmute your microphone
+              </Text>
+              <View style={styles.modalButtonContainer}>
+                <TouchableOpacity
+                  onPress={() => handleUnmuteRequest(false)}
+                  style={[styles.modalButton, styles.declineButton]}
+                >
+                  <Icon name="close" size={18} color="#fff" />
+                  <Text style={styles.modalButtonText}>Decline</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => handleUnmuteRequest(true)}
+                  style={[styles.modalButton, styles.acceptButton]}
+                >
+                  <Icon name="check" size={18} color="#fff" />
+                  <Text style={styles.modalButtonText}>Accept</Text>
+                </TouchableOpacity>
+              </View>
+            </LinearGradient>
+          </View>
+        </Modal>
+
+        {controlsVisible && (
+  <Animated.View 
+    style={[
+      styles.controlsContainer,
+      {
+        transform: [{
+          translateY: controlsPosition.interpolate({
+            inputRange: [0, 100],
+            outputRange: [0, 100],
+          }),
+        }],
+      },
+    ]}
+  >
+          <LinearGradient
+            colors={['rgba(15, 32, 39, 0.9)', 'rgba(32, 58, 67, 0.9)']}
+            style={styles.controlsContainer}
+          >
+            <View style={styles.controlsRow}>
+              <TouchableOpacity
+                onPress={toggleMute}
+                style={styles.controlButton}
               >
-                <Text style={styles.modalButtonText}>Decline</Text>
+                <LinearGradient
+                  colors={
+                    isMuted ? ['#ff5e62', '#ff9966'] : ['#4b6cb7', '#182848']
+                  }
+                  style={styles.buttonCircle}
+                >
+                  <Icon
+                    name={isMuted ? 'mic-off' : 'mic'}
+                    size={24}
+                    color="#fff"
+                  />
+                </LinearGradient>
+                <Text style={styles.controlButtonText}>
+                  {isMuted ? 'Unmute' : 'Mute'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={toggleSpeaker}
+                style={styles.controlButton}
+              >
+                <LinearGradient
+                  colors={
+                    isSpeakerOn
+                      ? ['#2193b0', '#6dd5ed']
+                      : ['#4b6cb7', '#182848']
+                  }
+                  style={styles.buttonCircle}
+                >
+                  <Icon3
+                    name={isSpeakerOn ? 'speaker' : 'speaker-off'}
+                    size={24}
+                    color="#fff"
+                  />
+                </LinearGradient>
+                <Text style={styles.controlButtonText}>
+                  {isSpeakerOn ? 'Speaker' : 'Earpiece'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={toggleVideo}
+                style={styles.controlButton}
+              >
+                <LinearGradient
+                  colors={
+                    isVideoOn ? ['#2193b0', '#6dd5ed'] : ['#4b6cb7', '#182848']
+                  }
+                  style={styles.buttonCircle}
+                >
+                  <Icon
+                    name={isVideoOn ? 'videocam' : 'videocam-off'}
+                    size={24}
+                    color="#fff"
+                  />
+                </LinearGradient>
+                <Text style={styles.controlButtonText}>
+                  {isVideoOn ? 'Video On' : 'Video Off'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={switchCamera}
+                style={styles.controlButton}
+              >
+                <LinearGradient
+                  colors={['#4b6cb7', '#182848']}
+                  style={styles.buttonCircle}
+                >
+                  <Icon name="flip-camera-android" size={24} color="#fff" />
+                </LinearGradient>
+                <Text style={styles.controlButtonText}>Flip</Text>
               </TouchableOpacity>
             </View>
-          </View>
-        </View>
-      </Modal>
 
-      {remoteStream ? (
-        <RTCView
-          streamURL={remoteStream.toURL()}
-          style={styles.remoteVideo}
-          objectFit="cover"
-        />
-      ) : (
-        <View style={styles.remoteVideoPlaceholder}>
-          <Text style={styles.statusText}>
-            {status} {otherUserName ? `with ${otherUserName}` : ''}
-          </Text>
-        </View>
-      )}
-
-      {localStream && isVideoOn && (
-        <RTCView
-          streamURL={localStream.toURL()}
-          style={styles.localVideo}
-          objectFit="cover"
-          mirror={isFrontCamera}
-          zOrder={1}
-        />
-      )}
-
-      <View style={styles.durationContainer}>
-        <Text style={styles.durationText}>{callDuration}</Text>
-      </View>
-
-      <View style={styles.controlsContainer}>
-        <TouchableOpacity onPress={toggleMute} style={styles.controlButton}>
-          <Text style={styles.controlButtonEmoji}>{isMuted ? '🔇' : '🎤'}</Text>
-          <Text style={styles.controlButtonText}>
-            {isMuted ? 'Unmute' : 'Mute'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={toggleSpeaker} style={styles.controlButton}>
-          <Text style={styles.controlButtonEmoji}>
-            {isSpeakerOn ? '🔊' : '🎧'}
-          </Text>
-          <Text style={styles.controlButtonText}>
-            {isSpeakerOn ? 'Speaker' : 'Earpiece'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={toggleVideo} style={styles.controlButton}>
-          <Text style={styles.controlButtonEmoji}>
-            {isVideoOn ? '📹' : '📷'}
-          </Text>
-          <Text style={styles.controlButtonText}>
-            {isVideoOn ? 'Video Off' : 'Video On'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity onPress={switchCamera} style={styles.controlButton}>
-          <Text style={styles.controlButtonEmoji}>🔄</Text>
-          <Text style={styles.controlButtonText}>Switch</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={() => endCall()}
-          style={styles.endCallButton}
-        >
-          <Text style={styles.controlButtonEmoji}>📞</Text>
-          <Text style={styles.endCallButtonText}>End</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+            <TouchableOpacity
+              onPress={() => endCall()}
+              style={styles.endCallButton}
+            >
+              <LinearGradient
+                colors={['#ff416c', '#ff4b2b']}
+                style={styles.endCallGradient}
+              >
+                <Icon name="call-end" size={30} color="#fff" />
+              </LinearGradient>
+            </TouchableOpacity>
+          </LinearGradient>
+         </Animated.View>
+)}
+      </LinearGradient>
+    </TouchableOpacity>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
-    position: 'relative',
   },
   remoteVideo: {
     flex: 1,
@@ -866,131 +1100,183 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#000',
+  },
+  userAvatar: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  localVideoContainer: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    width: 100,
+    height: 140,
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
   localVideo: {
-    position: 'absolute',
-    width: 120,
-    height: 160,
-    top: 20,
-    right: 20,
-    borderRadius: 8,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#fff',
+    width: '100%',
+    height: '100%',
   },
   statusText: {
     color: 'white',
     fontSize: 18,
+    marginTop: 10,
+    fontWeight: '500',
   },
   durationContainer: {
     position: 'absolute',
-    top: 50,
+    top: 20,
     alignSelf: 'center',
     backgroundColor: 'rgba(0,0,0,0.5)',
-    padding: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   durationText: {
     color: 'white',
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
   },
   controlsContainer: {
     position: 'absolute',
-    bottom: 40,
+    bottom: 0,
     left: 0,
     right: 0,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 30,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+  },
+  controlsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-evenly',
-    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 30,
   },
   controlButton: {
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    width: 70,
-    height: 70,
-    borderRadius: 35,
   },
-  controlButtonEmoji: {
-    fontSize: 24,
+  buttonCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
   },
   controlButtonText: {
     color: 'white',
     fontSize: 12,
-    marginTop: 4,
+    fontWeight: '500',
   },
   endCallButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'red',
+    alignSelf: 'center',
     width: 70,
     height: 70,
     borderRadius: 35,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    overflow: 'hidden',
   },
-  endCallButtonText: {
-    color: 'white',
-    fontSize: 12,
-    marginTop: 4,
+  endCallGradient: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
- remoteMuteIndicator: {
-  position: 'absolute',
-  top: 80,
-  alignSelf: 'center',
-  backgroundColor: 'rgba(255,0,0,0.7)',
-  padding: 8,
-  borderRadius: 20,
-  flexDirection: 'row',
-  alignItems: 'center',
-  zIndex: 100, // Ensure it appears above other elements
-},
+  remoteMuteIndicator: {
+    position: 'absolute',
+    top: 100,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255,50,50,0.7)',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    zIndex: 100,
+    elevation: 3,
+  },
   remoteMuteText: {
     color: 'white',
     fontSize: 14,
-    marginRight: 10,
+    marginLeft: 8,
+    fontWeight: '500',
   },
   unmuteRequestButton: {
     backgroundColor: 'rgba(255,255,255,0.3)',
     paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-   
+    paddingHorizontal: 12,
+    borderRadius: 15,
+    marginLeft: 10,
   },
   unmuteRequestText: {
     color: 'white',
     fontSize: 12,
+    fontWeight: '500',
   },
-  modalContainer: {
+  modalOverlay: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
   },
   modalContent: {
-    backgroundColor: 'white',
-    padding: 20,
-    borderRadius: 10,
+    borderRadius: 15,
     width: '80%',
+    padding: 20,
+    elevation: 5,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 10,
+    marginLeft: 10,
+    color: '#fff',
   },
   modalText: {
     fontSize: 16,
-    marginBottom: 20,
+    color: 'rgba(255,255,255,0.8)',
+    marginBottom: 25,
+    lineHeight: 22,
   },
   modalButtonContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
+    justifyContent: 'space-between',
   },
   modalButton: {
-    padding: 10,
-    borderRadius: 5,
-    width: '40%',
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 8,
+    width: '48%',
   },
   acceptButton: {
     backgroundColor: '#4CAF50',
@@ -1001,6 +1287,8 @@ const styles = StyleSheet.create({
   modalButtonText: {
     color: 'white',
     fontWeight: 'bold',
+    marginLeft: 8,
+    fontSize: 16,
   },
 });
 

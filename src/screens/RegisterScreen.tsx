@@ -1,26 +1,36 @@
 import React, { useState } from 'react';
-import { View, TextInput, Button, Alert, StyleSheet } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  Alert,
+  StyleSheet,
+  SafeAreaView,
+} from 'react-native';
+import Icon from 'react-native-vector-icons/Feather';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { User } from '../types/User';
-import { Picker } from '@react-native-picker/picker';
 import { API_URL } from '../services/service';
 
 type Props = NativeStackScreenProps<any, 'Register'>;
 
 const RegisterScreen: React.FC<Props> = ({ navigation }) => {
-  const [user, setUser] = useState<User>({
-    username: '',
-    password: '',
-    fullName: '',
-    role: 'DOCTOR',
-  });
+  const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleRegister = async () => {
     try {
       const res = await fetch(`${API_URL}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user),
+        body: JSON.stringify({
+          fullName,
+          username,
+          password,
+          role: 'PATIENT',
+        }),
       });
 
       if (res.ok) {
@@ -36,26 +46,123 @@ const RegisterScreen: React.FC<Props> = ({ navigation }) => {
   };
 
   return (
-    <View style={styles.container}>
-      <TextInput placeholder="Full Name" onChangeText={(t) => setUser({ ...user, fullName: t })} style={styles.input} />
-      <TextInput placeholder="Username" onChangeText={(t) => setUser({ ...user, username: t })} style={styles.input} />
-      <TextInput placeholder="Password" secureTextEntry onChangeText={(t) => setUser({ ...user, password: t })} style={styles.input} />
-      <Picker
-        selectedValue={user.role}
-        onValueChange={(val: any) => setUser({ ...user, role: val })}
-        style={styles.picker}>
-        <Picker.Item label="Doctor" value="DOCTOR" />
-        <Picker.Item label="Patient" value="PATIENT" />
-      </Picker>
-      <Button title="Register" onPress={handleRegister} />
-    </View>
+    <SafeAreaView style={styles.root}>
+      <View style={styles.card}>
+        <Text style={styles.title}>Patient Registration</Text>
+
+        <View style={styles.inputContainer}>
+          <Icon name="user" size={18} color="#aaa" style={styles.icon} />
+          <TextInput
+            placeholder="Full Name"
+            value={fullName}
+            onChangeText={setFullName}
+            style={styles.input}
+            placeholderTextColor="#aaa"
+          />
+        </View>
+
+        <View style={styles.inputContainer}>
+          <Icon name="user" size={18} color="#aaa" style={styles.icon} />
+          <TextInput
+            placeholder="Username"
+            value={username}
+            onChangeText={setUsername}
+            style={styles.input}
+            placeholderTextColor="#aaa"
+          />
+        </View>
+
+        <View style={styles.inputContainer}>
+          <Icon name="lock" size={18} color="#aaa" style={styles.icon} />
+          <TextInput
+            placeholder="Password"
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            style={styles.input}
+            placeholderTextColor="#aaa"
+          />
+          <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+            <Icon name={showPassword ? 'eye-off' : 'eye'} size={18} color="#aaa" />
+          </TouchableOpacity>
+        </View>
+
+        <TouchableOpacity style={styles.registerButton} onPress={handleRegister}>
+          <Text style={styles.registerButtonText}>Register</Text>
+        </TouchableOpacity>
+
+        <Text
+          onPress={() => navigation.navigate('Login')}
+          style={styles.link}
+        >
+          Already have an account? Login
+        </Text>
+      </View>
+    </SafeAreaView>
   );
 };
 
 export default RegisterScreen;
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 20 },
-  input: { borderBottomWidth: 1, marginBottom: 20 },
-  picker: { height: 50, marginBottom: 20 },
+  root: {
+    flex: 1,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 20,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 8,
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+    color: '#333',
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 16,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  icon: {
+    marginRight: 10,
+  },
+  input: {
+    flex: 1,
+    fontSize: 16,
+    color: '#333',
+  },
+  registerButton: {
+    backgroundColor: '#007BFF',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  registerButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  link: {
+    marginTop: 20,
+    textAlign: 'center',
+    color: 'blue',
+    textDecorationLine: 'underline',
+    fontSize: 14,
+  },
 });

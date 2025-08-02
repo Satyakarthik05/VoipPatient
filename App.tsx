@@ -18,11 +18,31 @@ const App = () => {
       <StatusBar barStyle="dark-content" />
       <NavigationContainer>
         <Stack.Navigator initialRouteName="Login">
-          <Stack.Screen name="Login" component={LoginScreen} />
-          <Stack.Screen name="Register" component={RegisterScreen} />
-          <Stack.Screen name="Home" component={HomeScreen} />
-          <Stack.Screen name="CallSetup" component={CallSetupScreen} />
-          <Stack.Screen name="VideoCallScreen" component={VideoCallScreen} />
+          <Stack.Screen
+            name="Login"
+            component={LoginScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="Register"
+            component={RegisterScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="CallSetup"
+            component={CallSetupScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="VideoCallScreen"
+            component={VideoCallScreen}
+            options={{ headerShown: false }}
+          />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaView>
